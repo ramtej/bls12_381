@@ -1,6 +1,7 @@
 use crate::fp::*;
 use crate::fp2::*;
 use crate::fp6::*;
+use crate::scalar::MODULUS;
 
 use core::fmt;
 use core::ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign};
@@ -191,6 +192,100 @@ impl Fp12 {
                 c0: self.c0 * t,
                 c1: self.c1 * -t,
             })
+    }
+
+    /// Although this is labeled "vartime", it is only
+    /// variable time with respect to the exponent. It
+    /// is also not exposed in the public API.
+    fn pow_vartime(&self, by: &[u64]) -> Self {
+        let mut res = Self::one();
+        for e in by.iter().rev() {
+            for i in (0..64).rev() {
+                res = res.square();
+
+                if ((*e >> i) & 1) == 1 {
+                    res *= self;
+                }
+            }
+        }
+        res
+    }
+
+    /// Attempts to convert a big-endian byte representation into an `Fp12`.
+    ///
+    /// Only fails when the underlying Fp elements are not canonical,
+    /// but not when `Fp12` is not part of the subgroup.
+    pub fn from_bytes_unchecked(bytes: &[u8; 576]) -> CtOption<Fp12> {
+        let mut buf = [0u8; 288];
+
+        buf.copy_from_slice(&bytes[0..288]);
+        let c0 = Fp6::from_bytes_unchecked(&buf);
+        buf.copy_from_slice(&bytes[288..576]);
+        let c1 = Fp6::from_bytes_unchecked(&buf);
+
+        c0.and_then(|c0| c1.map(|c1| Fp12 { c0, c1 }))
+    }
+
+    /// Attempts to convert a little-endian byte representation of
+    /// a scalar into an `Fp12`, failing if the input is not canonical.
+    pub fn from_bytes(bytes: &[u8; 576]) -> CtOption<Fp12> {
+        Fp12::from_bytes_unchecked(bytes).and_then(|res| {
+            let is_some = res.is_element();
+            CtOption::new(res, is_some)
+        })
+    }
+
+    /// Converts an element of `Fp12` into a byte representation in
+    /// big-endian byte order.
+    pub fn to_bytes(&self) -> [u8; 576] {
+        let mut res = [0; 576];
+
+        res[0..288].copy_from_slice(&self.c0.to_bytes());
+        res[288..576].copy_from_slice(&self.c1.to_bytes());
+
+        res
+    }
+
+    /// Returns true if this element belongs to the Fp12 group.
+    pub fn is_element(&self) -> Choice {
+        // The exponent is a constant,
+        // thus this operation is constant time as well.
+        let modulus_pow = self.pow_vartime(&MODULUS.0);
+
+        // Any field of characteristic p has at most one subgroup
+        // of order q so it suffices to check that raising the
+        // element to the power q aka scalar::MODULUS gives the
+        // identity.
+
+        modulus_pow.ct_eq(&Fp12::one())
+    }
+
+    /// Returns true if this element belongs to the Fp12 group.
+    pub fn is_gt_element(&self) -> Choice {
+        // The order of the element must be exactly q in order to avoid
+        // possible small groups attacks on bls12_381.
+
+        let x_p = self.frobenius_map();
+        let x_p2 = x_p.frobenius_map();
+        let x_p4 = x_p2.frobenius_map().frobenius_map();
+        let x_p4_x = x_p4.mul(self);
+        // Two verifications must be made:
+        // - on one part, check that x^(p^4)*x == x^(p^2).
+        //   It means to verify that x^(p^4-p^2+1) == 1 and then Ord(x)
+        //   divides p^4-p^2+1.
+        let first_check = x_p4_x.ct_eq(&x_p2);
+
+        // - on another part, check that x^p == x^u.
+        //   It means to verify that p+1-t = p-u. Since gcd(p+1-t,p^4-p^2+1) = r
+        //   and Ord(x) divides p+1-t, then Ord(x) is exactly r.
+        let x_minus_u = self.pow_vartime(&[crate::BLS_X]);
+        let x_u = x_minus_u.invert();
+        if x_u.is_some().into() {
+            let second_check = x_p.ct_eq(&x_u.unwrap());
+            self.is_element() & first_check & second_check
+        } else {
+            Choice::from(0)
+        }
     }
 }
 
