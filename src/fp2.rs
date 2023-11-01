@@ -7,7 +7,7 @@ use subtle::{Choice, ConditionallySelectable, ConstantTimeEq, CtOption};
 
 use crate::fp::Fp;
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Hash)]
 pub struct Fp2 {
     pub c0: Fp,
     pub c1: Fp,
